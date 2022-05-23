@@ -3,9 +3,11 @@ package main
 import (
 	"archive/zip"
 	"context"
+	"io"
 	"os"
 	"path"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -73,8 +75,28 @@ func download(p string) error {
 		return err
 	}
 	defer archive.Close()
+
 	for _, f := range archive.File {
-		glog.Debug(f.FileInfo().IsDir())
+		name := "/tmp/CYCLETMP/" + f.Name
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(name, os.ModePerm)
+			continue
+		}
+		if strings.HasPrefix(path.Base(f.Name), ".") {
+			continue
+		}
+		glog.Debug(name)
+		dst, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return err
+		}
+		in, err := f.Open()
+		if err != nil {
+			return err
+		}
+		io.Copy(dst, in)
+		dst.Close()
+		in.Close()
 	}
 	return nil
 }

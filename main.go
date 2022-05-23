@@ -1,17 +1,18 @@
 package main
 
 import (
-	"archive/zip"
 	"context"
-	"io"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/bendersilver/glog"
+	"github.com/go-audio/wav"
 	"github.com/go-redis/redis/v8"
 	"github.com/imroc/req"
 	"github.com/joho/godotenv"
@@ -29,17 +30,19 @@ var ctx = context.Background()
 
 func main() {
 
-	download("/tmp/CYCLE42_Signalbuilder_-_CYCLE42.zip")
-	glog.Fatal()
 	req.SetTimeout(time.Minute * 10)
 	glog.Debug("start kdb:", os.Getenv("KDB_HOST"))
 	kdb = redis.NewClient(&redis.Options{
 		Addr: os.Getenv("KDB_HOST"),
 		DB:   14,
 	})
-	if !kdb.HExists(ctx, "cyclon.motorlab", "last").Val() {
-		kdb.HSet(ctx, "cyclon.motorlab", "last", "CYCLE41").Err()
+	if kdb.Ping(ctx).Val() != "PONG" {
+		glog.Fatal("redis not exists")
 	}
+
+	// if !kdb.HExists(ctx, "cyclon.motorlab", "last").Val() {
+	kdb.HSet(ctx, "cyclon.motorlab", "last", "CYCLE01").Err()
+	// }
 	var err error
 	bot, err = tb.NewBot(tb.Settings{
 		Token:       os.Getenv("BOT_TOKEN"),
@@ -51,7 +54,9 @@ func main() {
 	if err != nil {
 		glog.Fatal(err)
 	}
+
 	bot.Handle("/start", commandStart)
+	loopCyclonMotorlab()
 	bot.Start()
 }
 
@@ -61,44 +66,64 @@ func commandStart(m *tb.Message) {
 }
 
 func download(p string) error {
-	// rsp, err := req.Get(cyclon + p)
-	// if err != nil {
-	// 	return err
-	// }
-	fl := "/tmp/" + path.Base(p)
-	// err := rsp.ToFile(fl)
-	// if err != nil {
-	// 	return err
-	// }
-	archive, err := zip.OpenReader(fl)
+	rsp, err := req.Get(cyclon + p)
 	if err != nil {
 		return err
 	}
-	defer archive.Close()
-
-	for _, f := range archive.File {
-		name := "/tmp/CYCLETMP/" + f.Name
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(name, os.ModePerm)
-			continue
-		}
-		if strings.HasPrefix(path.Base(f.Name), ".") {
-			continue
-		}
-		glog.Debug(name)
-		dst, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			return err
-		}
-		in, err := f.Open()
-		if err != nil {
-			return err
-		}
-		io.Copy(dst, in)
-		dst.Close()
-		in.Close()
+	os.RemoveAll("/tmp/CYCLETMP/")
+	os.MkdirAll("/tmp/CYCLETMP/", os.ModePerm)
+	fl := "/tmp/CYCLETMP/" + path.Base(p)
+	err = rsp.ToFile(fl)
+	if err != nil {
+		return err
 	}
-	return nil
+	err = exec.Command("unzip", fl, "-d", "/tmp/CYCLETMP/").Run()
+	if err != nil {
+		return err
+	}
+
+	var alb tb.Album
+
+	err = filepath.Walk("/tmp/CYCLETMP/", func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(info.Name(), ".") {
+			return nil
+		}
+		if path.Ext(info.Name()) == ".wav" {
+			f, err := os.Open(p)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			s, err := wav.NewDecoder(f).Duration()
+			if err != nil {
+				return err
+			}
+			glog.Debug(info.Name(), p, int(s.Seconds()))
+			a := &tb.Audio{Title: info.Name(), File: tb.FromDisk(p), Duration: int(s.Seconds())}
+			msg, err := bot.Send(&tb.User{ID: 80868958}, a)
+			// telegram: Request Entity Too Large (400
+			if err != nil {
+				return err
+			}
+			bot.Delete(msg)
+			alb = append(alb, a)
+		} else if path.Ext(info.Name()) == ".jpg" {
+			_, err := bot.Send(&tb.User{ID: 80868958}, &tb.Photo{File: tb.FromDisk(p)})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		glog.Error(err)
+		return err
+	}
+	_, err = bot.SendAlbum(&tb.User{ID: 80868958}, alb)
+	return err
 }
 
 func loopCyclonMotorlab() {
